@@ -6,6 +6,18 @@ Repository: `https://github.com/notasandworm/vsec.git` (or `git@github.com:notas
 
 ---
 
+## 📁 Repository Structure
+
+```text
+.
+├── README.md       # Project documentation
+├── install.sh      # System-wide installation script
+└── bin/
+    └── vsec        # Dashboard binary payload
+```
+
+---
+
 ## 🚀 Quick Installation
 
 Install `vsec` system-wide to `/usr/local/bin/vsec` using a single command:
@@ -13,7 +25,7 @@ Install `vsec` system-wide to `/usr/local/bin/vsec` using a single command:
 ### Option 1: Direct Binary Download (`curl -o`)
 
 ```bash
-sudo curl -fsSL https://raw.githubusercontent.com/notasandworm/vsec/main/vsec -o /usr/local/bin/vsec && sudo chmod +x /usr/local/bin/vsec
+sudo curl -fsSL https://raw.githubusercontent.com/notasandworm/vsec/main/bin/vsec -o /usr/local/bin/vsec && sudo chmod +x /usr/local/bin/vsec
 ```
 
 ### Option 2: Remote Installer Script (`curl | sudo bash`)

@@ -3,7 +3,7 @@ set -euo pipefail
 
 TARGET_DIR="/usr/local/bin"
 TARGET_BIN="${TARGET_DIR}/vsec"
-RAW_URL="https://raw.githubusercontent.com/notasandworm/vsec/main/vsec"
+RAW_URL="https://raw.githubusercontent.com/notasandworm/vsec/main/bin/vsec"
 
 echo "==> Installing vsec (Server Security Dashboard & Monitoring CLI)..."
 
@@ -18,7 +18,7 @@ fi
 $SUDO mkdir -p "$TARGET_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOCAL_VSEC="${SCRIPT_DIR}/vsec"
+LOCAL_VSEC="${SCRIPT_DIR}/bin/vsec"
 
 if [ -f "$LOCAL_VSEC" ]; then
     echo "==> Installing vsec from local repository..."
