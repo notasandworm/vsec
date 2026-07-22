@@ -2,8 +2,6 @@
 
 `vsec` is a lightweight, zero-dependency bash and Python utility for Linux servers (Debian/Ubuntu) that aggregates system security posture, network isolation, firewall state, active sessions, and brute-force intrusion metrics into an instant CLI dashboard or structured JSON payload.
 
-Repository: `https://github.com/notasandworm/vsec.git` (or `git@github.com:notasandworm/vsec.git`)
-
 ---
 
 ## 📁 Repository Structure
@@ -22,16 +20,16 @@ Repository: `https://github.com/notasandworm/vsec.git` (or `git@github.com:notas
 
 Install `vsec` system-wide to `/usr/local/bin/vsec` using a single command:
 
-### Option 1: Direct Binary Download (`curl -o`)
-
-```bash
-sudo curl -fsSL https://raw.githubusercontent.com/notasandworm/vsec/main/bin/vsec -o /usr/local/bin/vsec && sudo chmod +x /usr/local/bin/vsec
-```
-
-### Option 2: Remote Installer Script (`curl | sudo bash`)
+### Option 1: Remote Installer Script (`curl | sudo bash`)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/notasandworm/vsec/main/install.sh | sudo bash
+```
+
+### Option 2: Direct Binary Download (`curl -o`)
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/notasandworm/vsec/main/bin/vsec -o /usr/local/bin/vsec && sudo chmod +x /usr/local/bin/vsec
 ```
 
 ### Option 3: Local Repository Clone
