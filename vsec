@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+
+# Enforce root execution for systemd journal access and firewall queries
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ Error: Please run this script with sudo."
+  exit 1
+fi
+
+# Argument parsing
+JSON_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --json|-j)
+      JSON_MODE=true
+      ;;
+    --help|-h)
+      echo "Usage: sudo vsec [--json|-j] [--help|-h]"
+      echo "  --json, -j    Output metrics in structured JSON format"
+      echo "  --help, -h    Display this help message"
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg"
+      echo "Usage: sudo vsec [--json|-j] [--help|-h]"
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$JSON_MODE" = true ]; then
+  python3 - << 'EOF'
+import subprocess
+import json
+import re
+import os
+
+def run_cmd(cmd):
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        return res.stdout.strip()
+    except Exception as e:
+        return ""
+
+report = {}
+
+# 1. UFW Firewall
+ufw_raw = run_cmd("ufw status verbose")
+report["ufw"] = {
+    "raw": ufw_raw,
+    "active": "Status: active" in ufw_raw
+}
+
+# 2. Tailscale Status
+ts_installed = run_cmd("command -v tailscale") != ""
+ts_raw = run_cmd("tailscale status") if ts_installed else ""
+report["tailscale"] = {
+    "installed": ts_installed,
+    "running": ts_installed and ("Tailscale is stopped" not in ts_raw and len(ts_raw) > 0),
+    "raw": ts_raw
+}
+
+# 3. Cloudflare Mesh / Tunnels
+cf_installed = run_cmd("command -v cloudflared") != ""
+cf_active = run_cmd("systemctl is-active cloudflared 2>/dev/null") == "active"
+report["cloudflare"] = {
+    "installed": cf_installed,
+    "active": cf_active
+}
+
+# 4. Docker Status
+docker_installed = run_cmd("command -v docker") != ""
+docker_active = run_cmd("systemctl is-active docker 2>/dev/null") == "active"
+docker_containers_raw = run_cmd("docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null") if docker_active else ""
+report["docker"] = {
+    "installed": docker_installed,
+    "active": docker_active,
+    "containers": [line for line in docker_containers_raw.splitlines() if line] if docker_containers_raw else []
+}
+
+# 5. Fail2ban
+f2b_installed = run_cmd("command -v fail2ban-client") != ""
+f2b_jails = []
+if f2b_installed:
+    jails_raw = run_cmd("fail2ban-client status | grep 'Jail list:' | sed 's/ //g' | awk -F':' '{print $2}'")
+    jail_names = [j for j in jails_raw.replace(',', ' ').split() if j]
+    for j in jail_names:
+        status_raw = run_cmd(f"fail2ban-client status '{j}'")
+        curr_banned = 0
+        tot_banned = 0
+        m_curr = re.search(r"Currently banned:\s*(\d+)", status_raw)
+        m_tot = re.search(r"Total banned:\s*(\d+)", status_raw)
+        if m_curr: curr_banned = int(m_curr.group(1))
+        if m_tot: tot_banned = int(m_tot.group(1))
+        f2b_jails.append({
+            "name": j,
+            "currently_banned": curr_banned,
+            "total_banned": tot_banned
+        })
+
+report["fail2ban"] = {
+    "installed": f2b_installed,
+    "jails": f2b_jails
+}
+
+# 6. SSH Activity & Metrics
+ssh_svc = ""
+if run_cmd("systemctl is-active --quiet sshd && echo 1") == "1":
+    ssh_svc = "sshd"
+elif run_cmd("systemctl is-active --quiet ssh && echo 1") == "1":
+    ssh_svc = "ssh"
+
+failed_24h_str = run_cmd(f"journalctl -u {ssh_svc} --since '24 hours ago' 2>/dev/null | grep -c 'Failed password' || true") if ssh_svc else "0"
+try:
+    failed_24h = int(failed_24h_str)
+except ValueError:
+    failed_24h = 0
+
+logs_raw = run_cmd(f"journalctl -u {ssh_svc} -n 5 --no-pager 2>/dev/null") if ssh_svc else ""
+report["ssh"] = {
+    "service": ssh_svc,
+    "failed_logins_24h": failed_24h,
+    "recent_logs": [line for line in logs_raw.splitlines() if line]
+}
+
+# 7. Journal Persistence
+journal_persistent = os.path.isdir("/var/log/journal")
+report["journald"] = {
+    "persistent": journal_persistent,
+    "storage_path": "/var/log/journal" if journal_persistent else "/run/log/journal"
+}
+
+# 8. Open Listening Sockets
+ss_raw = run_cmd("ss -tulpn | grep -vE '127\\.0\\.0\\.1|::1'")
+sockets = []
+for line in ss_raw.splitlines():
+    if line.startswith("Netid"): continue
+    parts = line.split()
+    if len(parts) >= 5:
+        netid = parts[0]
+        state = parts[1]
+        local = parts[4]
+        proc = parts[6] if len(parts) > 6 else ""
+        
+        itype = "global_public"
+        if "100." in local or "[fd7a:" in local:
+            itype = "tailscale"
+        elif "192.168." in local or "10." in local or "172." in local:
+            itype = "lan"
+            
+        sockets.append({
+            "netid": netid,
+            "state": state,
+            "local_address": local,
+            "process": proc,
+            "interface_type": itype
+        })
+
+report["listening_sockets"] = sockets
+
+# 9. Currently Logged-in Sessions
+who_raw = run_cmd("who")
+sessions = []
+for line in who_raw.splitlines():
+    if line:
+        parts = line.split()
+        if len(parts) >= 4:
+            user = parts[0]
+            has_remote = parts[-1].startswith("(") and parts[-1].endswith(")")
+            remote_ip = parts[-1].strip("()") if has_remote else ""
+            time_idx_end = -2 if has_remote else -1
+            time_str = f"{parts[time_idx_end-1]} {parts[time_idx_end]}"
+            tty_str = parts[time_idx_end-2]
+            sessions.append({
+                "user": user,
+                "tty": tty_str,
+                "login_time": time_str,
+                "remote_ip": remote_ip
+            })
+report["logged_in_sessions"] = sessions
+
+print(json.dumps(report, indent=2))
+EOF
+  exit 0
+fi
+
+# Define ANSI escape codes for quick terminal scanning
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BOLD='\033[1m'
+NC='\033[0m' 
+
+echo -e "${BLUE}====================================================${NC}"
+echo -e "${BLUE}          🛡️  SERVER SECURITY DASHBOARD          ${NC}"
+echo -e "${BLUE}====================================================${NC}"
+
+# 1. UFW FIREWALL STATUS
+echo -e "\n${GREEN}▶ 1. UFW Firewall Status (Verbose)${NC}"
+ufw status verbose
+
+# 2. TAILSCALE MESH STATUS
+echo -e "\n${GREEN}▶ 2. Tailscale Network Mesh Status${NC}"
+if command -v tailscale &> /dev/null; then
+  tailscale status | head -n 10
+else
+  echo -e "${RED}Tailscale is not running or installed.${NC}"
+fi
+
+# 3. CLOUDFLARE MESH & TUNNELS STATUS
+echo -e "\n${GREEN}▶ 3. Cloudflare Mesh & Tunnels Status${NC}"
+if command -v cloudflared &> /dev/null; then
+  if systemctl is-active --quiet cloudflared; then
+    echo -e "${GREEN}cloudflared daemon is active and running.${NC}"
+  else
+    echo -e "${YELLOW}cloudflared is installed but service is inactive.${NC}"
+  fi
+else
+  echo -e "Cloudflare daemon (cloudflared) is not installed."
+fi
+
+# 4. DOCKER CONTAINERS & ISOLATION STATUS
+echo -e "\n${GREEN}▶ 4. Docker Containers & Network Isolation${NC}"
+if command -v docker &> /dev/null; then
+  if systemctl is-active --quiet docker; then
+    echo -e "Active Containers:"
+    CONTAINERS=$(docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null)
+    if [ -n "$CONTAINERS" ]; then
+      echo "$CONTAINERS"
+    else
+      echo "  (No running containers)"
+    fi
+  else
+    echo -e "${YELLOW}Docker is installed but daemon is inactive.${NC}"
+  fi
+else
+  echo -e "Docker is not installed."
+fi
+
+# 5. FAIL2BAN JAIL ACTIVITY
+echo -e "\n${GREEN}▶ 5. Fail2ban Jail Activity${NC}"
+if command -v fail2ban-client &> /dev/null; then
+  fail2ban-client status | grep -E "Number of jail|Jail list"
+  
+  # Parse out jails dynamically to display per-jail execution metrics
+  JAILS=$(fail2ban-client status | grep "Jail list:" | sed "s/ //g" | awk -F':' '{print $2}' | tr ',' ' ')
+  for jail in $JAILS; do
+    echo -e "${YELLOW}   Jail: [$jail]${NC}"
+    fail2ban-client status "$jail" | grep -E "Currently banned|Total banned" | sed 's/^/     /'
+  done
+else
+  echo -e "${RED}Fail2ban is not running or installed.${NC}"
+fi
+
+# 6. RECENT SSHD JOURNAL LOGS & BRUTE-FORCE METRICS
+echo -e "\n${GREEN}▶ 6. SSH Security & Daemon Activity${NC}"
+if systemctl is-active --quiet sshd; then
+  SSH_SVC="sshd"
+elif systemctl is-active --quiet ssh; then
+  SSH_SVC="ssh"
+else
+  SSH_SVC=""
+fi
+
+if [ -n "$SSH_SVC" ]; then
+  FAILED_24H=$(journalctl -u "$SSH_SVC" --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || true)
+  if [ "$FAILED_24H" -gt 0 ]; then
+    echo -e "${YELLOW}⚠️  Failed SSH authentication attempts in last 24h: ${FAILED_24H}${NC}"
+  else
+    echo -e "${GREEN}✓ No failed SSH authentication attempts recorded in last 24h.${NC}"
+  fi
+  echo -e "\nRecent Journal Log Entries (Last 5):"
+  journalctl -u "$SSH_SVC" -n 5 --no-pager
+else
+  echo -e "${RED}Active SSH service unit could not be found via systemd.${NC}"
+fi
+
+# 7. JOURNAL PERSISTENCE CHECK
+echo -e "\n${GREEN}▶ 7. Journald System Storage Check${NC}"
+if [ -d "/var/log/journal" ]; then
+  echo -e "${GREEN}✓ Journald persistence: ACTIVE (/var/log/journal exists)${NC}"
+else
+  echo -e "${YELLOW}⚠️  Journald persistence: VOLATILE (/var/log/journal missing, logs reset on reboot)${NC}"
+fi
+
+# 8. ACTIVE EXTERNAL LISTENING PORTS
+echo -e "\n${GREEN}▶ 8. Non-Localhost Open Listening Sockets${NC}"
+ss -tulpn | grep -vE '127\.0\.0\.1|::1'
+echo -e ""
+echo -e "note: sshd is bound to 0.0.0.0 relying on UFW for interface filtering while allowing the daemon to listen globally."
+echo -e "      This setup is more robust against system boot race conditions. ty."
+
+# 9. CURRENTLY LOGGED-IN SESSIONS
+echo -e "\n${GREEN}▶ 9. Currently Logged-in Sessions${NC}"
+who
+
+echo -e ""
+echo -e "End of Report. Thank you. Goodbye."
