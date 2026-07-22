@@ -10,6 +10,7 @@ echo "==> Installing vsec (Server Security Dashboard & Monitoring CLI)..."
 # Require sudo/root privileges for installing to /usr/local/bin
 if [ "$EUID" -ne 0 ]; then
     echo "🔑 Sudo privileges required to install to ${TARGET_DIR}."
+    sudo -v || true
     SUDO="sudo"
 else
     SUDO=""
@@ -45,7 +46,8 @@ echo "Binary Installed: ${TARGET_BIN}"
 echo ""
 echo "Usage Instructions:"
 echo "  * vsec requires root/sudo privileges for journald and socket access."
-echo "  * Run the security dashboard:"
+echo "  * To view your server security dashboard, run:"
 echo "      sudo vsec"
 echo "  * Generate structured JSON output:"
 echo "      sudo vsec --json"
+
